@@ -50,25 +50,38 @@ except ImportError:
     def tqdm(x):
         return x
 
+
 from pytorch_fid.inception import InceptionV3
 
 parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-parser.add_argument('--batch-size', type=int, default=50,
+parser.add_argument('--batch-size',
+                    type=int,
+                    default=50,
                     help='Batch size to use')
-parser.add_argument('--num-workers', type=int, default=8,
-                    help='Number of processes to use for data loading')
-parser.add_argument('--device', type=str, default=None,
+parser.add_argument('--device',
+                    type=str,
+                    default=None,
                     help='Device to use. Like cuda, cuda:0 or cpu')
-parser.add_argument('--dims', type=int, default=2048,
+parser.add_argument('--dims',
+                    type=int,
+                    default=2048,
                     choices=list(InceptionV3.BLOCK_INDEX_BY_DIM),
                     help=('Dimensionality of Inception features to use. '
                           'By default, uses pool3 features'))
-parser.add_argument('path', type=str, nargs=2,
+parser.add_argument('--glob',
+                    type=str,
+                    nargs=2,
+                    help=('Regular expressions for the file names'
+                          'in the specified directories'))
+parser.add_argument('path',
+                    type=str,
+                    nargs=2,
                     help=('Paths to the generated images or '
                           'to .npz statistic files'))
 
-IMAGE_EXTENSIONS = {'bmp', 'jpg', 'jpeg', 'pgm', 'png', 'ppm',
-                    'tif', 'tiff', 'webp'}
+IMAGE_EXTENSIONS = {
+    'bmp', 'jpg', 'jpeg', 'pgm', 'png', 'ppm', 'tif', 'tiff', 'webp'
+}
 
 
 class ImagePathDataset(torch.utils.data.Dataset):
@@ -87,7 +100,7 @@ class ImagePathDataset(torch.utils.data.Dataset):
         return img
 
 
-def get_activations(files, model, batch_size=50, dims=2048, device='cpu', num_workers=8):
+def get_activations(files, model, batch_size=50, dims=2048, device='cpu'):
     """Calculates the activations of the pool_3 layer for all images.
 
     Params:
@@ -100,7 +113,6 @@ def get_activations(files, model, batch_size=50, dims=2048, device='cpu', num_wo
                      implementation.
     -- dims        : Dimensionality of features returned by Inception
     -- device      : Device to run calculations
-    -- num_workers : Number of parallel dataloader workers
 
     Returns:
     -- A numpy array of dimension (num images, dims) that contains the
@@ -119,7 +131,7 @@ def get_activations(files, model, batch_size=50, dims=2048, device='cpu', num_wo
                                              batch_size=batch_size,
                                              shuffle=False,
                                              drop_last=False,
-                                             num_workers=num_workers)
+                                             num_workers=cpu_count())
 
     pred_arr = np.empty((len(files), dims))
 
@@ -198,12 +210,15 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
 
     tr_covmean = np.trace(covmean)
 
-    return (diff.dot(diff) + np.trace(sigma1)
-            + np.trace(sigma2) - 2 * tr_covmean)
+    return (diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) -
+            2 * tr_covmean)
 
 
-def calculate_activation_statistics(files, model, batch_size=50, dims=2048,
-                                    device='cpu', num_workers=8):
+def calculate_activation_statistics(files,
+                                    model,
+                                    batch_size=50,
+                                    dims=2048,
+                                    device='cpu'):
     """Calculation of the statistics used by the FID.
     Params:
     -- files       : List of image files paths
@@ -213,7 +228,6 @@ def calculate_activation_statistics(files, model, batch_size=50, dims=2048,
                      depends on the hardware.
     -- dims        : Dimensionality of features returned by Inception
     -- device      : Device to run calculations
-    -- num_workers : Number of parallel dataloader workers
 
     Returns:
     -- mu    : The mean over samples of the activations of the pool_3 layer of
@@ -221,28 +235,36 @@ def calculate_activation_statistics(files, model, batch_size=50, dims=2048,
     -- sigma : The covariance matrix of the activations of the pool_3 layer of
                the inception model.
     """
-    act = get_activations(files, model, batch_size, dims, device, num_workers)
+    act = get_activations(files, model, batch_size, dims, device)
     mu = np.mean(act, axis=0)
     sigma = np.cov(act, rowvar=False)
     return mu, sigma
 
 
-def compute_statistics_of_path(path, model, batch_size, dims, device, num_workers=8):
+def compute_statistics_of_path(path, model, batch_size, dims, device, glob_re):
     if path.endswith('.npz'):
         with np.load(path) as f:
             m, s = f['mu'][:], f['sigma'][:]
     else:
         path = pathlib.Path(path)
-        files = sorted([file for ext in IMAGE_EXTENSIONS
-                       for file in path.glob('*.{}'.format(ext))])
-        m, s = calculate_activation_statistics(files, model, batch_size,
-                                               dims, device, num_workers)
+        if glob_re is None:
+            files = sorted([
+                file for ext in IMAGE_EXTENSIONS
+                for file in path.glob('*.{}'.format(ext))
+            ])
+        else:
+            files = sorted(path.glob(glob_re))
+        m, s = calculate_activation_statistics(files, model, batch_size, dims,
+                                               device)
 
     return m, s
 
 
-def calculate_fid_given_paths(paths, batch_size, device, dims, num_workers=8):
+def calculate_fid_given_paths(paths, batch_size, device, dims, glob_re):
     """Calculates the FID of two paths"""
+    if glob_re is None:
+        glob_re = [None, None]
+
     for p in paths:
         if not os.path.exists(p):
             raise RuntimeError('Invalid path: %s' % p)
@@ -251,10 +273,10 @@ def calculate_fid_given_paths(paths, batch_size, device, dims, num_workers=8):
 
     model = InceptionV3([block_idx]).to(device)
 
-    m1, s1 = compute_statistics_of_path(paths[0], model, batch_size,
-                                        dims, device, num_workers)
-    m2, s2 = compute_statistics_of_path(paths[1], model, batch_size,
-                                        dims, device, num_workers)
+    m1, s1 = compute_statistics_of_path(paths[0], model, batch_size, dims,
+                                        device, glob_re[0])
+    m2, s2 = compute_statistics_of_path(paths[1], model, batch_size, dims,
+                                        device, glob_re[1])
     fid_value = calculate_frechet_distance(m1, s1, m2, s2)
 
     return fid_value
@@ -268,11 +290,8 @@ def main():
     else:
         device = torch.device(args.device)
 
-    fid_value = calculate_fid_given_paths(args.path,
-                                          args.batch_size,
-                                          device,
-                                          args.dims,
-                                          args.num_workers)
+    fid_value = calculate_fid_given_paths(args.path, args.batch_size, device,
+                                          args.dims, args.glob)
     print('FID: ', fid_value)
 
 
